@@ -119,13 +119,32 @@ describe("SelfUpdateService", () => {
           Image: "ghcr.io/acme/agent:2.0.0",
           Env: ["A=1"],
           Labels: expect.objectContaining({ "traefik.enable": "true", [SelfUpdateService.ROLE_LABEL]: SelfUpdateService.ROLE_VALUE }),
-          HostConfig: { Binds: ["/agent:/agent"] },
+          HostConfig: { Binds: ["/agent:/agent"], Privileged: true, PidMode: "host" },
         }),
       );
       expect(docker.startContainer).toHaveBeenCalledWith("sibling-000000000000");
       expect(docker.stopContainer).not.toHaveBeenCalled();
       expect(docker.removeContainer).not.toHaveBeenCalled();
       expect(postSafeMock).toHaveBeenCalledWith(expect.objectContaining({ type: "agent_update_started" }));
+    });
+
+    it("forces Privileged and PidMode on the sibling and drops GroupAdd, even if the predecessor didn't have them", async () => {
+      const docker = makeDocker({
+        getContainer: vi.fn().mockResolvedValue({
+          Name: "/agent",
+          Config: { Labels: {}, Env: ["A=1"], ExposedPorts: {} },
+          HostConfig: { Binds: ["/agent:/agent"], Privileged: false, GroupAdd: ["999"] },
+        }),
+      });
+      const service = makeService(docker);
+
+      await service.beginUpdate({ version: "2.0.0", image: "ghcr.io/acme/agent:2.0.0" });
+
+      expect(docker.createContainer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          HostConfig: { Binds: ["/agent:/agent"], Privileged: true, PidMode: "host" },
+        }),
+      );
     });
 
     it("strips AGENT_VERSION from the copied env so the new image's baked value wins", async () => {
