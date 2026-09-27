@@ -8,6 +8,77 @@ import { ShellService } from "../../src/services/Shell";
 
 vi.mock("../../src/services/Docker");
 vi.mock("../../src/utils/console", () => ({ info: vi.fn(), error: vi.fn(), warn: vi.fn(), success: vi.fn(), _setLogger: vi.fn() }));
+vi.mock("../../src/services/HostShell", () => ({
+  hostCommand: vi.fn((cmd: string) => `nsenter -t 1 -m -u -i -n -p -- ${cmd}`),
+  runHost: vi.fn(),
+  writeHostFile: vi.fn(),
+}));
+
+describe("Shell Handlers — runShell / runCompose", () => {
+  let server: import("http").Server;
+  let mockDockerService: any;
+  let mockShellService: ShellService;
+  let closeFn: (() => Promise<void>) | null = null;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockDockerService = createDockerMock();
+    mockShellService = new ShellService();
+    vi.spyOn(mockShellService, "exec").mockResolvedValue({ output: "ok", error: "", exitCode: 0 });
+    const handlers = createShellHandlers(mockShellService, mockDockerService);
+    const s = await makeApp(
+      app => {
+        app.post("/run-shell", handlers.runShell);
+        app.post("/run-compose", handlers.runCompose);
+      },
+      { auth: false },
+    );
+
+    server = s.server;
+    closeFn = s.close;
+  });
+
+  afterEach(async () => {
+    if (closeFn) await closeFn();
+  });
+
+  it("routes runShell through the host's PID namespace, not the container's own", async () => {
+    const { hostCommand } = await import("../../src/services/HostShell");
+
+    const response = await request(server).post("/run-shell").send({ command: "docker image prune -af" });
+
+    expect(response.status).toBe(200);
+    expect(hostCommand).toHaveBeenCalledWith("docker image prune -af");
+    expect(mockShellService.exec).toHaveBeenCalledWith(
+      "nsenter -t 1 -m -u -i -n -p -- docker image prune -af",
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
+  });
+
+  it("writes the compose project to the host filesystem and runs docker compose in the host namespace", async () => {
+    const { runHost, writeHostFile, hostCommand } = await import("../../src/services/HostShell");
+
+    const response = await request(server)
+      .post("/run-compose")
+      .send({ project: "my-app", compose: "services:\n  web:\n    image: nginx\n" });
+
+    expect(response.status).toBe(200);
+    expect(runHost).toHaveBeenCalledWith(expect.stringContaining("mkdir -p"));
+    expect(writeHostFile).toHaveBeenCalledWith(
+      expect.stringContaining("my-app/docker-compose.yml"),
+      "services:\n  web:\n    image: nginx\n",
+    );
+    expect(hostCommand).toHaveBeenCalledWith(expect.stringContaining("docker compose -p 'my-app' up -d"));
+  });
+
+  it("rejects unsafe compose project names", async () => {
+    const response = await request(server)
+      .post("/run-compose")
+      .send({ project: "../etc", compose: "services: {}" });
+
+    expect(response.status).toBe(400);
+  });
+});
 
 describe("Shell Handlers — execContainer", () => {
   let server: import("http").Server;

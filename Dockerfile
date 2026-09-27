@@ -36,11 +36,6 @@ RUN npm ci --only=production && npm cache clean --force
 # Copy built code from builder
 COPY --from=builder /app/dist ./dist
 
-# Create non-root user for security
-RUN adduser -D -u 1001 appuser && \
-    chown -R appuser:appuser /app
-USER appuser
-
 # Use tini as entrypoint for proper signal handling
 ENTRYPOINT ["/sbin/tini", "--"]
 

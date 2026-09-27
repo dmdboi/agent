@@ -1,8 +1,8 @@
 import { Context } from "hono";
-import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { ShellService } from "../services/Shell";
 import { DockerService } from "../services/Docker";
+import { hostCommand, runHost, writeHostFile } from "../services/HostShell";
 import { demultiplexDockerStream, stripAnsiCodes } from "../utils/transformers";
 import { handleError } from "../utils/error";
 
@@ -17,7 +17,7 @@ export function createShellHandlers(shellService: ShellService, dockerService: D
 
   async function runShell(ctx: Context) {
     const { command } = await ctx.req.json<{ command: string }>();
-    const result = await shellService.exec(command, { timeout: 120_000 });
+    const result = await shellService.exec(hostCommand(command), { timeout: 120_000 });
     return ctx.json({
       output: result.output,
       error: result.error,
@@ -37,21 +37,21 @@ export function createShellHandlers(shellService: ShellService, dockerService: D
     }
 
     const dir = join(COMPOSE_BASE, project);
-    mkdirSync(dir, { recursive: true });
+    runHost(`mkdir -p '${dir}'`);
 
-    writeFileSync(join(dir, "docker-compose.yml"), compose, "utf-8");
+    writeHostFile(join(dir, "docker-compose.yml"), compose);
 
     if (env && Object.keys(env).length > 0) {
       const envContent = Object.entries(env)
         .map(([k, v]) => `${k}=${v}`)
         .join("\n");
-      writeFileSync(join(dir, ".env"), envContent, "utf-8");
+      writeHostFile(join(dir, ".env"), envContent);
     }
 
-    const result = await shellService.exec(`docker compose -p '${project}' up -d`, {
-      cwd: dir,
-      timeout: 300_000,
-    });
+    const result = await shellService.exec(
+      hostCommand(`sh -c "cd '${dir}' && docker compose -p '${project}' up -d"`),
+      { timeout: 300_000 },
+    );
 
     return ctx.json({
       output: result.output,
