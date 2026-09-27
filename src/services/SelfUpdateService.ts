@@ -1,3 +1,4 @@
+import type Docker from "dockerode";
 import { DockerService } from "./Docker";
 import { httpService } from "./Http";
 import { heartbeatService, type HeartbeatAgentUpdate } from "./HeartbeatService";
@@ -92,7 +93,7 @@ export class SelfUpdateService {
       Env: this.stripImageProvidedEnv(inspect.Config?.Env),
       Labels: labels,
       ExposedPorts: inspect.Config?.ExposedPorts,
-      HostConfig: inspect.HostConfig,
+      HostConfig: this.requiredHostConfig(inspect.HostConfig),
     });
 
     await this.docker.startContainer(created.id);
@@ -190,6 +191,18 @@ export class SelfUpdateService {
     );
 
     return named ? { Id: named.id } : null;
+  }
+
+  /**
+   * Forces Privileged/PidMode on every sibling rather than inheriting them
+   * from the predecessor, so a self-update always converges on the flags
+   * this version needs instead of carrying forward whatever a prior install
+   * happened to be launched with.
+   */
+  private requiredHostConfig(hostConfig: Docker.HostConfig | undefined): Docker.HostConfig {
+    const { GroupAdd, ...rest } = hostConfig ?? {};
+
+    return { ...rest, Privileged: true, PidMode: "host" };
   }
 
   private stripImageProvidedEnv(env: string[] | undefined): string[] | undefined {
