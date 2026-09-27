@@ -1,6 +1,6 @@
 {
   "name": "agent",
-  "version": "2.6.0",
+  "version": "2.7.1",
   "description": "A node.js agent for managing remote Docker containers.",
   "main": "index.js",
   "scripts": {
