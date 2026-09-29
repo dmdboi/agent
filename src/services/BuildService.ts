@@ -90,8 +90,8 @@ export class BuildService {
     }
   }
 
-  // Pushes the freshly built image and drops the local tags, so a build server does not
-  // accumulate an image per commit. Returns the pushed reference.
+  // Pushes the freshly built image and drops the local tags whether or not the push succeeded,
+  // so a build server does not accumulate an image per commit. Returns the pushed reference.
   private async pushBuiltImage(imageTag: string, push: NonNullable<BuildOptions["push"]>): Promise<string> {
     try {
       await this.dockerService.pushImage(imageTag, push.image, {
@@ -101,12 +101,12 @@ export class BuildService {
       });
     } catch (err) {
       throw new PushError((err as Error).message);
-    }
-
-    for (const ref of [push.image, imageTag]) {
-      await this.dockerService.removeImage(ref).catch(err => {
-        warn(this.name, "Failed to remove local image after push", { ref, error: (err as Error).message });
-      });
+    } finally {
+      for (const ref of [push.image, imageTag]) {
+        await this.dockerService.removeImage(ref).catch(err => {
+          warn(this.name, "Failed to remove local image after push", { ref, error: (err as Error).message });
+        });
+      }
     }
 
     return push.image;

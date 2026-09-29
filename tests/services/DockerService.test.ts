@@ -142,6 +142,18 @@ describe("DockerService", () => {
       await expect(service.pushImage("myapp:sha", "ghcr.io/owner/repo:sha", auth)).rejects.toThrow("connection reset");
     });
 
+    it("rejects with a timeout error and destroys the stream when the push stalls", async () => {
+      const destroy = vi.fn();
+      const tag = vi.fn().mockResolvedValue(undefined);
+      const push = vi.fn().mockResolvedValue({ destroy });
+      (service.docker as any).getImage = (name: string) => (name === "myapp:sha" ? { tag } : { push });
+      (service.docker as any).checkAuth = (_auth: unknown, cb: any) => cb(null);
+      (service.docker as any).modem = { followProgress: () => undefined };
+
+      await expect(service.pushImage("myapp:sha", "ghcr.io/owner/repo:sha", auth, 20)).rejects.toThrow("Image push timed out after 0s");
+      expect(destroy).toHaveBeenCalledTimes(1);
+    });
+
     it("rejects before tagging when registry authentication fails", async () => {
       const { tag } = mockDocker([]);
       (service.docker as any).checkAuth = (_auth: unknown, cb: any) => cb(new Error("unauthorized"));

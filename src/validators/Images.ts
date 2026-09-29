@@ -9,6 +9,9 @@ export const pushTargetSchema = z.object({
   registry: z.string().min(1).optional(),
   username: z.string().min(1).optional(),
   password: z.string().min(1).optional(),
+}).refine(push => !(push.username || push.password) || Boolean(push.username && push.password && push.registry), {
+  message: "username, password and registry must be provided together",
+  path: ["password"],
 });
 
 export const createImageSchema = z.object({

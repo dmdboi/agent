@@ -163,16 +163,16 @@ describe("BuildService", () => {
       });
     });
 
-    it("reports build_failed with reason push_failed and keeps the local image when the push fails", async () => {
+    it("reports build_failed with reason push_failed and removes the local tags when the push fails", async () => {
       const dockerService = {
         buildImage: vi.fn().mockResolvedValue(undefined),
         pushImage: vi.fn().mockRejectedValue(new Error("denied: permission_denied")),
-        removeImage: vi.fn(),
+        removeImage: vi.fn().mockResolvedValue(undefined),
       };
 
       await new BuildService(dockerService as any, gitServiceWithDockerfile() as any).buildFromRepo({ ...options, push });
 
-      expect(dockerService.removeImage).toHaveBeenCalledTimes(0);
+      expect(dockerService.removeImage.mock.calls).toEqual([["ghcr.io/owner/repo:abc123"], ["owner/repo:abc123"]]);
       expect(postSafeMock).toHaveBeenCalledWith(
         expect.objectContaining({ type: "build_failed", reason: "push_failed", error: "denied: permission_denied" }),
       );
