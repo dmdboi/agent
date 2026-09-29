@@ -6,7 +6,7 @@ import { join } from "path";
 import { DockerService } from "./Docker";
 import { GitService, GitCloneError } from "./Git";
 import { httpService } from "./Http";
-import { error, info } from "../utils/console";
+import { error, info, warn } from "../utils/console";
 import config from "../config";
 
 export interface BuildOptions {
@@ -16,9 +16,14 @@ export interface BuildOptions {
   deploymentId: string;
   token: string;
   buildArgs?: Record<string, string>;
+  push?: { image: string; registry?: string; username?: string; password?: string };
 }
 
-type BuildFailureReason = GitCloneError["reason"] | "no_dockerfile" | "build_failed" | "invalid_application_id";
+type BuildFailureReason = GitCloneError["reason"] | "no_dockerfile" | "build_failed" | "push_failed" | "invalid_application_id";
+
+class PushError extends Error {
+  readonly reason = "push_failed" as const;
+}
 
 class NoDockerfileError extends Error {
   readonly reason = "no_dockerfile" as const;
@@ -35,7 +40,7 @@ export class BuildService {
   // Fire-and-forget entry point: clones, builds, and reports the outcome to CORE_URL.
   // Never throws — failures are reported as a `build_failed` event instead.
   async buildFromRepo(options: BuildOptions): Promise<void> {
-    const { name, tag, applicationId, deploymentId, token, buildArgs } = options;
+    const { name, tag, applicationId, deploymentId, token, buildArgs, push } = options;
     const imageTag = `${name.toLowerCase()}:${tag}`;
 
     // applicationId feeds directly into a filesystem path below. The HTTP-layer schema already
@@ -64,6 +69,8 @@ export class BuildService {
 
       info(this.name, "Build completed", { name, tag, applicationId, deploymentId, image: imageTag });
 
+      const image = push ? await this.pushBuiltImage(imageTag, push) : imageTag;
+
       // `image` is the exact reference the caller can hand straight to POST /containers.
       // deploymentId lets the caller update the exact Deployment this build was for,
       // rather than guessing "whichever build is still pending for this application" —
@@ -73,14 +80,36 @@ export class BuildService {
         type: "build_completed",
         applicationId,
         deploymentId,
-        image: imageTag,
+        image,
       });
     } catch (err) {
-      const reason: BuildFailureReason = err instanceof GitCloneError || err instanceof NoDockerfileError ? err.reason : "build_failed";
+      const reason: BuildFailureReason = err instanceof GitCloneError || err instanceof NoDockerfileError || err instanceof PushError ? err.reason : "build_failed";
       await this.reportFailure(applicationId, deploymentId, name, tag, reason, (err as Error).message);
     } finally {
       await rm(workDir, { recursive: true, force: true });
     }
+  }
+
+  // Pushes the freshly built image and drops the local tags, so a build server does not
+  // accumulate an image per commit. Returns the pushed reference.
+  private async pushBuiltImage(imageTag: string, push: NonNullable<BuildOptions["push"]>): Promise<string> {
+    try {
+      await this.dockerService.pushImage(imageTag, push.image, {
+        registry: push.registry,
+        username: push.username,
+        password: push.password,
+      });
+    } catch (err) {
+      throw new PushError((err as Error).message);
+    }
+
+    for (const ref of [push.image, imageTag]) {
+      await this.dockerService.removeImage(ref).catch(err => {
+        warn(this.name, "Failed to remove local image after push", { ref, error: (err as Error).message });
+      });
+    }
+
+    return push.image;
   }
 
   private async reportFailure(

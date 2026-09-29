@@ -14,6 +14,7 @@ interface CreateImageOptions {
   applicationId: string;
   deploymentId: string;
   token: string;
+  push?: { image: string; registry?: string; username?: string; password?: string };
 }
 
 export function createImageHandlers(dockerService: DockerService, buildService: BuildService) {

@@ -128,4 +128,66 @@ describe("BuildService", () => {
       expect.objectContaining({ type: "build_failed", applicationId: "../../etc", reason: "invalid_application_id", error: "Invalid applicationId" }),
     );
   });
+
+  describe("with a push target", () => {
+    const push = { image: "ghcr.io/owner/repo:abc123", registry: "ghcr.io", username: "user", password: "secret" };
+
+    const gitServiceWithDockerfile = () => ({
+      cloneAndCheckout: vi.fn().mockImplementation(async (_repo, _tag, _token, destDir) => {
+        const { mkdir, writeFile } = await import("fs/promises");
+        await mkdir(destDir, { recursive: true });
+        await writeFile(join(destDir, "Dockerfile"), "FROM scratch\n");
+      }),
+    });
+
+    it("pushes the built image, reports the pushed reference, and removes the local tags", async () => {
+      const dockerService = {
+        buildImage: vi.fn().mockResolvedValue(undefined),
+        pushImage: vi.fn().mockResolvedValue(undefined),
+        removeImage: vi.fn().mockResolvedValue(undefined),
+      };
+
+      await new BuildService(dockerService as any, gitServiceWithDockerfile() as any).buildFromRepo({ ...options, push });
+
+      expect(dockerService.pushImage).toHaveBeenCalledWith("owner/repo:abc123", "ghcr.io/owner/repo:abc123", {
+        registry: "ghcr.io",
+        username: "user",
+        password: "secret",
+      });
+      expect(dockerService.removeImage.mock.calls).toEqual([["ghcr.io/owner/repo:abc123"], ["owner/repo:abc123"]]);
+      expect(postSafeMock).toHaveBeenCalledWith({
+        type: "build_completed",
+        applicationId: "app_1",
+        deploymentId: "deploy_1",
+        image: "ghcr.io/owner/repo:abc123",
+      });
+    });
+
+    it("reports build_failed with reason push_failed and keeps the local image when the push fails", async () => {
+      const dockerService = {
+        buildImage: vi.fn().mockResolvedValue(undefined),
+        pushImage: vi.fn().mockRejectedValue(new Error("denied: permission_denied")),
+        removeImage: vi.fn(),
+      };
+
+      await new BuildService(dockerService as any, gitServiceWithDockerfile() as any).buildFromRepo({ ...options, push });
+
+      expect(dockerService.removeImage).toHaveBeenCalledTimes(0);
+      expect(postSafeMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "build_failed", reason: "push_failed", error: "denied: permission_denied" }),
+      );
+    });
+
+    it("still reports build_completed when removing the local tags fails", async () => {
+      const dockerService = {
+        buildImage: vi.fn().mockResolvedValue(undefined),
+        pushImage: vi.fn().mockResolvedValue(undefined),
+        removeImage: vi.fn().mockRejectedValue(new Error("image is in use")),
+      };
+
+      await new BuildService(dockerService as any, gitServiceWithDockerfile() as any).buildFromRepo({ ...options, push });
+
+      expect(postSafeMock).toHaveBeenCalledWith(expect.objectContaining({ type: "build_completed", image: "ghcr.io/owner/repo:abc123" }));
+    });
+  });
 });

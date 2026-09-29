@@ -95,6 +95,62 @@ describe("DockerService", () => {
     });
   });
 
+  describe("pushImage", () => {
+    const auth = { registry: "ghcr.io", username: "user", password: "secret" };
+
+    function mockDocker(followProgressOutput: unknown[] | Error) {
+      const tag = vi.fn().mockResolvedValue(undefined);
+      const push = vi.fn().mockResolvedValue("fake-stream");
+      const getImage = vi.fn((name: string) => (name === "myapp:sha" ? { tag } : { push }));
+      (service.docker as any).getImage = getImage;
+      (service.docker as any).checkAuth = (_auth: unknown, cb: any) => cb(null);
+      (service.docker as any).modem = {
+        followProgress: (_stream: unknown, cb: any) => (followProgressOutput instanceof Error ? cb(followProgressOutput) : cb(null, followProgressOutput)),
+      };
+      return { tag, push, getImage };
+    }
+
+    it("tags the local image with the remote reference, then pushes it with registry auth", async () => {
+      const { tag, push, getImage } = mockDocker([{ status: "Pushed" }, { aux: { Tag: "sha", Digest: "sha256:abc" } }]);
+
+      await expect(service.pushImage("myapp:sha", "ghcr.io/owner/repo:sha", auth)).resolves.toBeUndefined();
+
+      expect(tag).toHaveBeenCalledWith({ repo: "ghcr.io/owner/repo", tag: "sha" });
+      expect(getImage).toHaveBeenCalledWith("ghcr.io/owner/repo:sha");
+      expect(push).toHaveBeenCalledWith({
+        authconfig: { username: "user", password: "secret", serveraddress: "ghcr.io", auth: "" },
+      });
+    });
+
+    it("keeps a registry port out of the tag split", async () => {
+      const { tag } = mockDocker([]);
+
+      await service.pushImage("myapp:sha", "registry.internal:5000/owner/repo:sha", auth);
+
+      expect(tag).toHaveBeenCalledWith({ repo: "registry.internal:5000/owner/repo", tag: "sha" });
+    });
+
+    it("rejects with the embedded error message when the push fails (HTTP 200, error in the stream)", async () => {
+      mockDocker([{ status: "Preparing" }, { errorDetail: { message: "denied: permission_denied" }, error: "denied: permission_denied" }]);
+
+      await expect(service.pushImage("myapp:sha", "ghcr.io/owner/repo:sha", auth)).rejects.toThrow("denied: permission_denied");
+    });
+
+    it("rejects when the push stream errors out", async () => {
+      mockDocker(new Error("connection reset"));
+
+      await expect(service.pushImage("myapp:sha", "ghcr.io/owner/repo:sha", auth)).rejects.toThrow("connection reset");
+    });
+
+    it("rejects before tagging when registry authentication fails", async () => {
+      const { tag } = mockDocker([]);
+      (service.docker as any).checkAuth = (_auth: unknown, cb: any) => cb(new Error("unauthorized"));
+
+      await expect(service.pushImage("myapp:sha", "ghcr.io/owner/repo:sha", auth)).rejects.toThrow("Authentication failed for ghcr.io");
+      expect(tag).toHaveBeenCalledTimes(0);
+    });
+  });
+
   describe("listContainersByLabel", () => {
     it("filters containers by a label=value pair", async () => {
       (service.docker as any).listContainers = vi.fn().mockResolvedValue([{ Id: "abc123" }]);
