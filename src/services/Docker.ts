@@ -34,6 +34,14 @@ interface PullImageAuth {
   registry: string;
 }
 
+const PUSH_TIMEOUT_MS = 15 * 60 * 1000;
+
+interface PushProgressEvent {
+  status?: string;
+  error?: string;
+  errorDetail?: { message?: string };
+}
+
 interface PullProgressEvent {
   status?: string;
   progress?: string;
@@ -457,6 +465,59 @@ export class DockerService {
     }
 
     info(this.name, "Successfully pulled image", { name });
+  }
+
+  // Tags `localTag` as `remoteRef` (host[:port]/path:tag) and pushes it. Like a failed build, a
+  // failed push still resolves the stream with HTTP 200 and only reports an `error` event.
+  async pushImage(localTag: string, remoteRef: string, auth?: Partial<PullImageAuth>, timeoutMs: number = PUSH_TIMEOUT_MS): Promise<void> {
+    info(this.name, "Pushing image", { localTag, remoteRef });
+
+    const authconfig = this.buildAuthConfig(auth);
+
+    if (authconfig) {
+      await this.validateAuth(authconfig, remoteRef);
+    }
+
+    const lastColon = remoteRef.lastIndexOf(":");
+    const repo = remoteRef.slice(0, lastColon);
+    const tag = remoteRef.slice(lastColon + 1);
+
+    await this.docker.getImage(localTag).tag({ repo, tag });
+
+    const stream = await this.docker.getImage(remoteRef).push({ authconfig });
+
+    const progress = this.followProgress<PushProgressEvent>(stream, event => {
+      if (event?.status && this.isSignificantProgressEvent(event.status)) {
+        info(this.name, "Image push progress", { remoteRef, status: event.status });
+      }
+    });
+
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        (stream as Partial<NodeJS.ReadableStream & { destroy: () => void }>).destroy?.();
+        reject(new Error(`Image push timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
+    });
+
+    let output: PushProgressEvent[];
+    try {
+      output = await Promise.race([progress, timeout]);
+    } catch (err) {
+      error(this.name, "Image push failed", { remoteRef, error: (err as Error).message });
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const failure = output.find(event => event.error || event.errorDetail);
+    if (failure) {
+      const message = failure.errorDetail?.message || failure.error || "Docker push failed";
+      error(this.name, "Image push failed", { remoteRef, error: message });
+      throw new Error(message);
+    }
+
+    info(this.name, "Successfully pushed image", { remoteRef });
   }
 
   async buildImage(contextPath: string, tag: string, buildArgs?: Record<string, string>): Promise<void> {

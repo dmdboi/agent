@@ -52,4 +52,37 @@ describe("createImageSchema", () => {
   it.each(["1BAD", "bad-key", "bad key", ""])("rejects a buildArgs key that isn't a valid identifier %j", key => {
     expect(createImageSchema.safeParse({ ...valid, buildArgs: { [key]: "value" } }).success).toBe(false);
   });
+
+  it("accepts a push target and keeps its fields", () => {
+    const push = { image: "ghcr.io/owner/repo:a1b2c3d", registry: "ghcr.io", username: "user", password: "secret" };
+    const result = createImageSchema.safeParse({ ...valid, push });
+    expect(result.success && result.data.push).toEqual(push);
+  });
+
+  it.each(["repo:tag", "ghcr.io/owner/repo", "ghcr.io/owner/repo:tag; rm -rf /", "ghcr.io/owner/re po:tag"])(
+    "rejects a malformed push image %j",
+    image => {
+      expect(createImageSchema.safeParse({ ...valid, push: { image } }).success).toBe(false);
+    },
+  );
+
+  it("accepts a push image with a registry port", () => {
+    expect(createImageSchema.safeParse({ ...valid, push: { image: "registry.internal:5000/owner/repo:a1b2c3d" } }).success).toBe(true);
+  });
+
+  it("accepts a push target with a registry and no credentials", () => {
+    const push = { image: "registry.internal:5000/owner/repo:a1b2c3d", registry: "registry.internal:5000" };
+    const result = createImageSchema.safeParse({ ...valid, push });
+    expect(result.success && result.data.push).toEqual(push);
+  });
+
+  it.each([
+    { username: "user" },
+    { password: "secret" },
+    { username: "user", password: "secret" },
+    { registry: "ghcr.io", username: "user" },
+  ])("rejects incomplete push credentials %j", credentials => {
+    const result = createImageSchema.safeParse({ ...valid, push: { image: "ghcr.io/owner/repo:a1b2c3d", ...credentials } });
+    expect(result.success ? [] : result.error.issues.map(issue => issue.message)).toEqual(["username, password and registry must be provided together"]);
+  });
 });
