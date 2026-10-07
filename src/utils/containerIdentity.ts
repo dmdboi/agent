@@ -40,15 +40,6 @@ export interface ContainerIdentity {
   workload_role: string | null;
 }
 
-export function emptyIdentity(): ContainerIdentity {
-  return {
-    application_id: null,
-    environment_id: null,
-    deployment_id: null,
-    workload_role: null,
-  };
-}
-
 /**
  * Parses raw `KEY=VALUE` env entries, keeping everything after the first `=`
  * (a value may itself contain `=`).
@@ -83,10 +74,15 @@ export function identityFromEnv(env?: readonly string[] | null): ContainerIdenti
   };
 }
 
-/** Identity read straight off Docker-event (or inspect) attributes. */
+/** Identity read straight off Docker-event (or inspect) labels. */
 export function identityFromLabels(labels?: Record<string, string> | null): ContainerIdentity {
   if (!labels) {
-    return emptyIdentity();
+    return {
+      application_id: null,
+      environment_id: null,
+      deployment_id: null,
+      workload_role: null,
+    };
   }
 
   return {
@@ -95,28 +91,6 @@ export function identityFromLabels(labels?: Record<string, string> | null): Cont
     deployment_id: labels[MANAGED_LABEL_KEYS.deploymentId] ?? null,
     workload_role: normalizeWorkloadRole(labels[MANAGED_LABEL_KEYS.workloadRole]),
   };
-}
-
-/** First non-null wins, per field. Sources are tried in the order given. */
-export function mergeIdentity(...sources: Array<ContainerIdentity | null | undefined>): ContainerIdentity {
-  const merged = emptyIdentity();
-
-  for (const source of sources) {
-    if (!source) {
-      continue;
-    }
-
-    merged.application_id ??= source.application_id;
-    merged.environment_id ??= source.environment_id;
-    merged.deployment_id ??= source.deployment_id;
-    merged.workload_role ??= source.workload_role;
-  }
-
-  return merged;
-}
-
-export function hasIdentity(identity: ContainerIdentity): boolean {
-  return Boolean(identity.application_id || identity.environment_id || identity.deployment_id || identity.workload_role);
 }
 
 /** Builds the labels a deploy stamps onto a container. Empty fields are omitted. */
@@ -147,32 +121,4 @@ export function buildManagedLabels(input: {
   }
 
   return labels;
-}
-
-/**
- * Flattens identity into the attribute keys Core already understands
- * (`application_id`, `environment_id`, `deployment_id`) plus `workload_role`.
- * `includeNulls` keeps the create contract stable: create has always sent those
- * three keys even when their value was unknown.
- */
-export function identityToAttributes(identity: ContainerIdentity, includeNulls = false): Record<string, string | null> {
-  const attributes: Record<string, string | null> = {};
-
-  if (includeNulls || identity.application_id !== null) {
-    attributes.application_id = identity.application_id;
-  }
-
-  if (includeNulls || identity.environment_id !== null) {
-    attributes.environment_id = identity.environment_id;
-  }
-
-  if (includeNulls || identity.deployment_id !== null) {
-    attributes.deployment_id = identity.deployment_id;
-  }
-
-  if (includeNulls || identity.workload_role !== null) {
-    attributes.workload_role = identity.workload_role;
-  }
-
-  return attributes;
 }
