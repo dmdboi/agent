@@ -387,6 +387,40 @@ describe("WatcherService", () => {
     expect(forwardedPayloads()[0].attributes.application_id).toBe("app-1");
   });
 
+  it("prefers managed inspect labels over conflicting environment identity", async () => {
+    mockDockerService.getContainer = vi.fn().mockResolvedValue({
+      Id: "abc123",
+      Name: "/app",
+      Config: {
+        Image: "app:1",
+        Env: ["CORE_APP_ID=env-app", "CORE_ENV_ID=env-environment", "CORE_DEPLOYMENT_ID=env-deployment"],
+        Labels: managedLabels,
+      },
+      State: { Status: "running" },
+      Created: "2026-01-01T00:00:00Z",
+    });
+
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await flush();
+
+    emitEvent(stream, {
+      Type: "container",
+      Action: "create",
+      Actor: { ID: "abc123", Attributes: {} },
+      time: 1_700_000_000,
+      timeNano: 0,
+    });
+    await flush();
+
+    expect(forwardedPayloads()[0].attributes).toMatchObject({
+      application_id: "app-1",
+      environment_id: "env-1",
+      deployment_id: "dep-1",
+      workload_role: "runtime",
+    });
+  });
+
   // --- exact timestamps -------------------------------------------------------
 
   it("preserves an exact timeNano above 2^53 from a chunk split across boundaries", async () => {
@@ -416,7 +450,7 @@ describe("WatcherService", () => {
     expect(payload.time).toBe(1_700_000_000);
   });
 
-  it("does not invent a timeNano when Docker omits or zeroes it", async () => {
+  it.each([undefined, 0])("preserves seconds without inventing precise identity when timeNano is %s", async timeNano => {
     const watcher = new WatcherService(mockDockerService);
     watcher.start();
     await Promise.resolve();
@@ -427,14 +461,15 @@ describe("WatcherService", () => {
       Action: "start",
       Actor: { ID: "abc123", Attributes: {} },
       time: 1_700_000_000,
-      timeNano: 0,
+      timeNano,
     });
 
     await flush();
 
     const [payload] = forwardedPayloads();
     expect(payload).not.toHaveProperty("timeNano");
-    expect(payload.event_id).toBe("container:start:abc123:1700000000");
+    expect(payload).not.toHaveProperty("event_id");
+    expect(payload.time).toBe(1_700_000_000);
   });
 
   it("splits the raw event image and tag when the create inspect fails", async () => {

@@ -327,13 +327,11 @@ export class WatcherService {
   }
 
   private buildEventId(event: DockerEvent, timeNano: string | null): string | null {
-    const occurrence = timeNano ?? (Number.isFinite(event.time) ? String(event.time) : null);
-
-    if (!occurrence) {
+    if (!timeNano) {
       return null;
     }
 
-    return `${event.Type}:${event.Action}:${event.Actor.ID}:${occurrence}`;
+    return `${event.Type}:${event.Action}:${event.Actor.ID}:${timeNano}`;
   }
 
   /** Copies the known identity fields onto an event's attributes. */
