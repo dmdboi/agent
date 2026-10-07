@@ -270,4 +270,77 @@ describe("DeployService", () => {
 
     expect(postMock).toHaveBeenCalledTimes(2);
   });
+
+  it("stamps managed identity labels on the runtime container", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200 }));
+    const docker = makeDocker();
+
+    await new DeployService(docker as never).deploy(
+      baseOptions({
+        retire: [],
+        container: {
+          name: "app-1",
+          image: "app:1",
+          networks: ["traefik"],
+          environment: ["CORE_APP_ID=app-1", "CORE_ENV_ID=env-1"],
+          labels: { "traefik.enable": "true" },
+        },
+      }),
+    );
+
+    expect(docker.createContainer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Labels: expect.objectContaining({
+          "traefik.enable": "true",
+          "io.serversinc.agent.application_id": "app-1",
+          "io.serversinc.agent.environment_id": "env-1",
+          "io.serversinc.agent.deployment_id": "dep_1",
+          "io.serversinc.agent.workload_role": "runtime",
+        }),
+      }),
+    );
+  });
+
+  it("marks only the pre-step container as a prestep workload", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200 }));
+    const stream = new PassThrough();
+    stream.end();
+    const oneShot = {
+      attach: vi.fn().mockResolvedValue(stream),
+      start: vi.fn().mockResolvedValue(undefined),
+      wait: vi.fn().mockResolvedValue({ StatusCode: 0 }),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    const prestepCreate = vi.fn().mockResolvedValue(oneShot);
+    const docker = makeDocker({ docker: { createContainer: prestepCreate } });
+
+    await new DeployService(docker as never).deploy(
+      baseOptions({
+        retire: [],
+        prestep: { run: true, command: ["true"] },
+        container: {
+          name: "app-1",
+          image: "app:1",
+          networks: ["traefik"],
+          environment: ["CORE_APP_ID=app-1"],
+          labels: { "traefik.enable": "true" },
+        },
+      }),
+    );
+
+    expect(prestepCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Labels: {
+          "io.serversinc.agent.application_id": "app-1",
+          "io.serversinc.agent.deployment_id": "dep_1",
+          "io.serversinc.agent.workload_role": "prestep",
+        },
+      }),
+    );
+    expect(docker.createContainer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Labels: expect.objectContaining({ "io.serversinc.agent.workload_role": "runtime" }),
+      }),
+    );
+  });
 });

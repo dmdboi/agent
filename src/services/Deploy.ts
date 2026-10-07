@@ -2,6 +2,13 @@ import { httpService } from "./Http";
 import { DockerService } from "./Docker";
 import { demultiplexDockerStream, stripAnsiCodes } from "../utils/transformers";
 import { info, warn, error as logError } from "../utils/console";
+import {
+  MANAGED_LABEL_KEYS,
+  WORKLOAD_ROLES,
+  WorkloadRole,
+  buildManagedLabels,
+  parseContainerEnv,
+} from "../utils/containerIdentity";
 
 const DEFAULT_STOP_GRACE_SECONDS = 140;
 const RUNNING_GRACE_MS = 3000;
@@ -89,7 +96,7 @@ export class DeployService {
       }
 
       log("Creating new container");
-      const newContainerId = await this.createContainer(options.container, log);
+      const newContainerId = await this.createContainer(options, log);
 
       const healthy = options.health
         ? await this.waitForHealthy(newContainerId, options.health, log)
@@ -158,7 +165,9 @@ export class DeployService {
     }
   }
 
-  private async createContainer(container: DeployContainerOptions, log: (line: string) => void): Promise<string> {
+  private async createContainer(options: DeployOptions, log: (line: string) => void): Promise<string> {
+    const container = options.container;
+
     await this.ensureImage(container);
 
     const networks = container.networks ?? [];
@@ -174,7 +183,7 @@ export class DeployService {
       name: container.name,
       Image: container.image,
       Env: container.environment,
-      Labels: container.labels,
+      Labels: { ...container.labels, ...this.identityLabels(options, WORKLOAD_ROLES.runtime) },
       ExposedPorts: container.exposedPorts,
       HostConfig: container.hostConfig,
       Cmd: container.command,
@@ -345,6 +354,18 @@ export class DeployService {
     }
   }
 
+  private identityLabels(options: DeployOptions, workloadRole: WorkloadRole): Record<string, string> {
+    const env = parseContainerEnv(options.container.environment);
+    const labels = options.container.labels ?? {};
+
+    return buildManagedLabels({
+      applicationId: env.get("CORE_APP_ID") ?? labels[MANAGED_LABEL_KEYS.applicationId] ?? null,
+      environmentId: env.get("CORE_ENV_ID") ?? labels[MANAGED_LABEL_KEYS.environmentId] ?? null,
+      deploymentId: options.deploymentId || labels[MANAGED_LABEL_KEYS.deploymentId] || null,
+      workloadRole,
+    });
+  }
+
   private async runPrestep(options: DeployOptions): Promise<{ ok: boolean; output: string }> {
     const container = options.container;
     await this.ensureImage(container);
@@ -355,6 +376,7 @@ export class DeployService {
       Image: container.image,
       Cmd: options.prestep!.command,
       Env: container.environment,
+      Labels: this.identityLabels(options, WORKLOAD_ROLES.prestep),
       Tty: false,
       HostConfig: {
         Binds: container.hostConfig?.Binds ?? [],
