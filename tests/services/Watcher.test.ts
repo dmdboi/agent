@@ -9,11 +9,32 @@ vi.mock("../../src/services/Http", () => ({
 }));
 
 import { httpService } from "../../src/services/Http";
+import { MANAGED_LABEL_KEYS } from "../../src/utils/containerIdentity";
 
 function fakeEventStream(): EventEmitter & { destroy: () => void } {
   const stream = new EventEmitter() as EventEmitter & { destroy: () => void };
   stream.destroy = vi.fn();
   return stream;
+}
+
+const managedLabels = {
+  [MANAGED_LABEL_KEYS.applicationId]: "app-1",
+  [MANAGED_LABEL_KEYS.environmentId]: "env-1",
+  [MANAGED_LABEL_KEYS.deploymentId]: "dep-1",
+  [MANAGED_LABEL_KEYS.workloadRole]: "runtime",
+};
+
+const flush = async (): Promise<void> => {
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+};
+
+const emitEvent = (stream: EventEmitter, event: Record<string, unknown>): void => {
+  stream.emit("data", Buffer.from(`${JSON.stringify(event)}\n`));
+};
+
+function forwardedPayloads(): any[] {
+  return (httpService.postSafe as any).mock.calls.map((call: any[]) => call[0].payload);
 }
 
 describe("WatcherService", () => {
@@ -244,5 +265,232 @@ describe("WatcherService", () => {
     // Drain the pending scheduleRestart() timer so it doesn't leak past the test.
     await vi.runOnlyPendingTimersAsync();
     vi.useRealTimers();
+  });
+
+  // --- identity prerequisites -------------------------------------------------
+
+  it("keeps labels-derived identity when the container inspect fails after deletion", async () => {
+    mockDockerService.getContainer = vi.fn().mockRejectedValue(new Error("No such container"));
+
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    emitEvent(stream, {
+      Type: "container",
+      Action: "create",
+      Actor: { ID: "deadbeef", Attributes: { ...managedLabels, image: "ghcr.io/acme/app:1" } },
+      time: 1_700_000_000,
+      timeNano: 1_700_000_000_123_456_789,
+    });
+
+    await flush();
+
+    const [payload] = forwardedPayloads();
+    expect(payload.attributes).toMatchObject({
+      application_id: "app-1",
+      environment_id: "env-1",
+      deployment_id: "dep-1",
+      workload_role: "runtime",
+    });
+    expect(payload.event).toBe("create");
+  });
+
+  it("surfaces identity from event attributes for start/die/destroy without inspecting", async () => {
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    for (const action of ["start", "die", "destroy"]) {
+      emitEvent(stream, {
+        Type: "container",
+        Action: action,
+        Actor: { ID: "deadbeef", Attributes: { ...managedLabels } },
+        time: 1_700_000_000,
+        timeNano: 1_700_000_000_100_000_000,
+      });
+    }
+
+    await flush();
+
+    expect(mockDockerService.getContainer).not.toHaveBeenCalled();
+    expect(forwardedPayloads().map(p => p.event)).toEqual(["start", "die", "destroy"]);
+    for (const payload of forwardedPayloads()) {
+      expect(payload.attributes).toMatchObject({
+        application_id: "app-1",
+        deployment_id: "dep-1",
+        workload_role: "runtime",
+      });
+    }
+  });
+
+  it("distinguishes prestep workloads from runtime workloads by label", async () => {
+    mockDockerService.getContainer = vi.fn().mockResolvedValue({
+      Id: "prestep1",
+      Name: "/prestep",
+      Config: { Image: "app:1", Env: [], Labels: { ...managedLabels, [MANAGED_LABEL_KEYS.workloadRole]: "prestep" } },
+      State: { Status: "created" },
+      Created: "2026-01-01T00:00:00Z",
+    });
+
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    emitEvent(stream, {
+      Type: "container",
+      Action: "create",
+      Actor: { ID: "prestep1", Attributes: { ...managedLabels, [MANAGED_LABEL_KEYS.workloadRole]: "prestep" } },
+      time: 1_700_000_000,
+      timeNano: 1_700_000_000_100_000_002,
+    });
+
+    await flush();
+
+    expect(forwardedPayloads()[0].attributes.workload_role).toBe("prestep");
+  });
+
+  it("never forwards container environment secrets", async () => {
+    mockDockerService.getContainer = vi.fn().mockResolvedValue({
+      Id: "abc123",
+      Name: "/app",
+      Config: {
+        Image: "app:1",
+        Env: ["CORE_APP_ID=app-1", "DB_PASSWORD=super-secret-value", "API_KEY=another-secret"],
+        Labels: {},
+      },
+      State: { Status: "running" },
+      Created: "2026-01-01T00:00:00Z",
+    });
+
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    emitEvent(stream, {
+      Type: "container",
+      Action: "create",
+      Actor: { ID: "abc123", Attributes: {} },
+      time: 1_700_000_000,
+      timeNano: 1_700_000_000_100_000_003,
+    });
+
+    await flush();
+
+    const serialised = JSON.stringify(forwardedPayloads()[0]);
+    expect(serialised).not.toContain("super-secret-value");
+    expect(serialised).not.toContain("another-secret");
+    expect(forwardedPayloads()[0].attributes.application_id).toBe("app-1");
+  });
+
+  it("prefers managed inspect labels over conflicting environment identity", async () => {
+    mockDockerService.getContainer = vi.fn().mockResolvedValue({
+      Id: "abc123",
+      Name: "/app",
+      Config: {
+        Image: "app:1",
+        Env: ["CORE_APP_ID=env-app", "CORE_ENV_ID=env-environment", "CORE_DEPLOYMENT_ID=env-deployment"],
+        Labels: managedLabels,
+      },
+      State: { Status: "running" },
+      Created: "2026-01-01T00:00:00Z",
+    });
+
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await flush();
+
+    emitEvent(stream, {
+      Type: "container",
+      Action: "create",
+      Actor: { ID: "abc123", Attributes: {} },
+      time: 1_700_000_000,
+      timeNano: 0,
+    });
+    await flush();
+
+    expect(forwardedPayloads()[0].attributes).toMatchObject({
+      application_id: "app-1",
+      environment_id: "env-1",
+      deployment_id: "dep-1",
+      workload_role: "runtime",
+    });
+  });
+
+  // --- exact timestamps -------------------------------------------------------
+
+  it("preserves an exact timeNano above 2^53 from a chunk split across boundaries", async () => {
+    // Built as literal text: JSON.stringify on a JS number would round the
+    // 19-digit value before it ever reached the watcher.
+    const raw =
+      '{"Type":"container","Action":"start","Actor":{"ID":"abc123","Attributes":{}},"time":1700000000,"timeNano":1700000000123456789}';
+
+    // Split inside the 19-digit timestamp so extraction must work on the raw text.
+    const splitAt = raw.indexOf("1700000000123456789") + 5;
+
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    stream.emit("data", Buffer.from(raw.slice(0, splitAt)));
+    stream.emit("data", Buffer.from(`${raw.slice(splitAt)}\n`));
+
+    await flush();
+
+    const [payload] = forwardedPayloads();
+    expect(payload.timeNano).toBe("1700000000123456789");
+    // The same value parsed as a JS number and re-stringified is demonstrably wrong.
+    expect(String(Number("1700000000123456789"))).not.toBe("1700000000123456789");
+    expect(payload.event_id).toBe("container:start:abc123:1700000000123456789");
+    expect(payload.time).toBe(1_700_000_000);
+  });
+
+  it.each([undefined, 0])("preserves seconds without inventing precise identity when timeNano is %s", async timeNano => {
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    emitEvent(stream, {
+      Type: "container",
+      Action: "start",
+      Actor: { ID: "abc123", Attributes: {} },
+      time: 1_700_000_000,
+      timeNano,
+    });
+
+    await flush();
+
+    const [payload] = forwardedPayloads();
+    expect(payload).not.toHaveProperty("timeNano");
+    expect(payload).not.toHaveProperty("event_id");
+    expect(payload.time).toBe(1_700_000_000);
+  });
+
+  it("splits the raw event image and tag when the create inspect fails", async () => {
+    mockDockerService.getContainer = vi.fn().mockRejectedValue(new Error("gone"));
+
+    const watcher = new WatcherService(mockDockerService);
+    watcher.start();
+    await flush();
+
+    emitEvent(stream, {
+      Type: "container",
+      Action: "create",
+      Actor: { ID: "c1", Attributes: { image: "registry.local:5000/acme/app:1.2", name: "app-1", ...managedLabels } },
+      time: 1,
+      timeNano: 100_000_000_000_070,
+    });
+    await flush();
+
+    const attributes = forwardedPayloads()[0].attributes;
+    expect(attributes.image).toBe("registry.local:5000/acme/app");
+    expect(attributes.tag).toBe("1.2");
+    expect(attributes.name).toBe("app-1");
   });
 });

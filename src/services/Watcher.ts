@@ -1,7 +1,7 @@
 import { error, info, warn } from "../utils/console";
 import { httpService } from "./Http";
 import { DockerService } from "./Docker";
-import { ContainerInspectInfo } from "dockerode";
+import { ContainerIdentity, identityFromEnv, identityFromLabels } from "../utils/containerIdentity";
 
 interface DockerEvent {
   Type: "container" | "image" | "volume" | "network" | "plugin" | string;
@@ -16,17 +16,15 @@ interface DockerEvent {
   status?: string;
 }
 
-interface ContainerDetails {
-  application_id: string | null;
-  environment_id: string | null;
-  deployment_id: string | null;
-}
-
 interface EventPayload {
   event: string;
   type: string;
   id: string;
   time: number;
+  /** Exact decimal nanosecond timestamp, kept as a string (see extractTimeNano). */
+  timeNano?: string;
+  /** Stable identity for one occurrence: type + action + Docker id + occurrence. */
+  event_id?: string;
   attributes: Record<string, unknown>;
 }
 
@@ -164,10 +162,15 @@ export class WatcherService {
 
       if (!line) continue;
 
+      // Extract the nanosecond timestamp from the raw text: JSON.parse turns a
+      // 19-digit integer into a float and silently rounds it, so the exact value
+      // has to be read before parsing.
+      const timeNano = WatcherService.extractTimeNano(line);
+
       try {
         const event = JSON.parse(line) as DockerEvent;
         // Don't await - process events asynchronously
-        this.handleEvent(event).catch(err => {
+        this.handleEvent(event, timeNano).catch(err => {
           error(this.name, "Error handling event", {
             error: err.message,
             event: event.Action,
@@ -182,8 +185,27 @@ export class WatcherService {
     }
   }
 
+  /**
+   * Reads `"timeNano":<digits>` from the raw line, verbatim. Returns null for a
+   * missing or zero value, and strips leading zeros so the caller can compare
+   * cheaply. Never goes through Number, so values above 2^53 stay exact.
+   */
+  private static extractTimeNano(rawLine: string): string | null {
+    const match = /"timeNano"\s*:\s*(\d+)/.exec(rawLine);
+
+    if (!match) {
+      return null;
+    }
+
+    if (/^0+$/.test(match[1])) {
+      return null;
+    }
+
+    return match[1].replace(/^0+(?=\d)/, "");
+  }
+
   // Handle parsed Docker event
-  private async handleEvent(event: DockerEvent): Promise<void> {
+  private async handleEvent(event: DockerEvent, timeNano: string | null): Promise<void> {
     if (!this.shouldForward(event)) {
       return;
     }
@@ -193,12 +215,25 @@ export class WatcherService {
       type: event.Type,
       id: event.Actor.ID,
       time: event.time,
-      attributes: event.Actor.Attributes,
+      attributes: { ...event.Actor.Attributes },
     };
+
+    if (event.Type === "container") {
+      if (timeNano) {
+        payload.timeNano = timeNano;
+      }
+
+      const eventId = this.buildEventId(event, timeNano);
+
+      if (eventId) {
+        payload.event_id = eventId;
+      }
+    }
 
     // Enrich an image pull with the details only an inspect can give — the raw
     // event carries just the reference. `Actor.ID` is that reference; a failed
-    // inspect still forwards the bare event.
+    // inspect still forwards the bare event. Image payloads are deliberately
+    // left as they were before identity work began.
     if (event.Action === "pull" && event.Type === "image") {
       try {
         const image = await this.docker.getImage(event.Actor.ID);
@@ -221,29 +256,11 @@ export class WatcherService {
 
     // Enrich with container details on creation
     if (event.Action === "create" && event.Type === "container") {
-      try {
-        const inspect = await this.docker.getContainer(event.Actor.ID);
-        const environment = this.getDetailsFromEnv(inspect);
-        const [image, tag] = this.parseImageTag(inspect.Config.Image);
-
-        payload.attributes = {
-          id: inspect.Id,
-          name: inspect.Name.replace(/^\//, ""),
-          image,
-          tag,
-          state: inspect.State.Status,
-          created: inspect.Created,
-          application_id: environment.application_id,
-          environment_id: environment.environment_id,
-          deployment_id: environment.deployment_id,
-        };
-      } catch (err) {
-        error(this.name, "Failed to enrich event with container details", {
-          error: (err as Error).message,
-          containerId: event.Actor.ID,
-        });
-        // Continue forwarding even if enrichment fails
-      }
+      await this.enrichContainerCreate(payload, event);
+    } else if (event.Type === "container") {
+      // start/die/destroy and friends carry the container's labels on the event
+      // itself, so identity survives without an inspect.
+      this.applyIdentity(payload.attributes, identityFromLabels(event.Actor.Attributes));
     }
 
     // Use postSafe to avoid throwing on http failures
@@ -257,6 +274,82 @@ export class WatcherService {
         action: event.Action,
         id: event.Actor.ID,
       });
+    }
+  }
+
+  /**
+   * Enriches a container create with the details only an inspect can give.
+   * Identity comes from the inspect's managed labels with the legacy `CORE_*`
+   * environment as a fallback; only the selected identity fields are forwarded,
+   * never the environment itself. The historical create shape is preserved.
+   */
+  private async enrichContainerCreate(payload: EventPayload, event: DockerEvent): Promise<void> {
+    try {
+      const inspect = await this.docker.getContainer(event.Actor.ID);
+      const [image, tag] = this.parseImageTag(inspect.Config.Image);
+      const fromLabels = identityFromLabels(inspect.Config?.Labels);
+      const fromEnv = identityFromEnv(inspect.Config?.Env);
+
+      payload.attributes = {
+        id: inspect.Id,
+        name: inspect.Name.replace(/^\//, ""),
+        image,
+        tag,
+        state: inspect.State.Status,
+        created: inspect.Created,
+        application_id: fromLabels.application_id ?? fromEnv.application_id,
+        environment_id: fromLabels.environment_id ?? fromEnv.environment_id,
+        deployment_id: fromLabels.deployment_id ?? fromEnv.deployment_id,
+      };
+
+      if (fromLabels.workload_role) {
+        payload.attributes.workload_role = fromLabels.workload_role;
+      }
+    } catch (err) {
+      error(this.name, "Failed to enrich event with container details", {
+        error: (err as Error).message,
+        containerId: event.Actor.ID,
+      });
+
+      // The event's raw `image` is the full reference. Split it so a create
+      // without an inspect still carries the separated image/tag shape Core
+      // already expects.
+      const rawImage = payload.attributes.image;
+
+      if (typeof rawImage === "string" && rawImage) {
+        const [image, tag] = this.parseImageTag(rawImage);
+        payload.attributes.image = image;
+        payload.attributes.tag = tag;
+      }
+
+      this.applyIdentity(payload.attributes, identityFromLabels(event.Actor.Attributes));
+    }
+  }
+
+  private buildEventId(event: DockerEvent, timeNano: string | null): string | null {
+    if (!timeNano) {
+      return null;
+    }
+
+    return `${event.Type}:${event.Action}:${event.Actor.ID}:${timeNano}`;
+  }
+
+  /** Copies the known identity fields onto an event's attributes. */
+  private applyIdentity(attributes: Record<string, unknown>, identity: ContainerIdentity): void {
+    if (identity.application_id !== null) {
+      attributes.application_id = identity.application_id;
+    }
+
+    if (identity.environment_id !== null) {
+      attributes.environment_id = identity.environment_id;
+    }
+
+    if (identity.deployment_id !== null) {
+      attributes.deployment_id = identity.deployment_id;
+    }
+
+    if (identity.workload_role !== null) {
+      attributes.workload_role = identity.workload_role;
     }
   }
 
@@ -292,22 +385,5 @@ export class WatcherService {
     const tag = imageName.substring(lastColon + 1);
 
     return [image, tag || "latest"];
-  }
-
-  private getDetailsFromEnv(inspect: ContainerInspectInfo): ContainerDetails {
-    const env = inspect.Config?.Env ?? [];
-
-    const envMap = new Map<string, string>(
-      env.map(entry => {
-        const [key, ...rest] = entry.split("=");
-        return [key, rest.join("=")] as [string, string];
-      }),
-    );
-
-    return {
-      application_id: envMap.get("CORE_APP_ID") ?? null,
-      environment_id: envMap.get("CORE_ENV_ID") ?? null,
-      deployment_id: envMap.get("CORE_DEPLOYMENT_ID") ?? null,
-    };
   }
 }

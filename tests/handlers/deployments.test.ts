@@ -62,6 +62,31 @@ describe("Deployment Handlers", () => {
     expect(mockDeployService.deploy).toHaveBeenCalledWith(expect.objectContaining({ stopGraceSeconds: 15 }));
   });
 
+  it("passes separate runtime and prestep labels through request validation unchanged", async () => {
+    const runtimeLabels = {
+      "io.serversinc.agent.application_id": "app-1",
+      "io.serversinc.agent.deployment_id": "dep_1",
+      "io.serversinc.agent.workload_role": "runtime",
+      "traefik.enable": "true",
+    };
+    const prestepLabels = {
+      "io.serversinc.agent.application_id": "app-1",
+      "io.serversinc.agent.deployment_id": "dep_1",
+      "io.serversinc.agent.workload_role": "prestep",
+    };
+
+    const response = await request(server).post("/deployments").send({
+      ...payload,
+      container: { ...payload.container, labels: runtimeLabels },
+      prestep: { run: true, command: ["true"], labels: prestepLabels },
+    });
+
+    expect(response.status).toBe(202);
+    const [options] = mockDeployService.deploy.mock.calls[0];
+    expect(options.container.labels).toEqual(runtimeLabels);
+    expect(options.prestep).toEqual({ run: true, command: ["true"], labels: prestepLabels });
+  });
+
   it("rejects a stop_grace_seconds above the 600s ceiling", async () => {
     const response = await request(server)
       .post("/deployments")

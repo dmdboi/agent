@@ -24,6 +24,7 @@ interface DeploymentRequestBody {
   prestep?: {
     run?: boolean;
     command?: string[];
+    labels?: Record<string, string>;
   };
 }
 
@@ -63,6 +64,7 @@ function normalise(body: DeploymentRequestBody): DeployOptions {
       ? {
           run: Boolean(body.prestep.run),
           command: body.prestep.command && body.prestep.command.length > 0 ? body.prestep.command : DEFAULT_PRESTEP_COMMAND,
+          labels: body.prestep.labels,
         }
       : undefined,
   };

@@ -38,7 +38,7 @@ export interface DeployOptions {
   health?: DeployHealthCheck;
   retire: string[];
   stopGraceSeconds?: number;
-  prestep?: { run: boolean; command: string[] };
+  prestep?: { run: boolean; command: string[]; labels?: Record<string, string> };
 }
 
 type DeployStatus = "completed" | "failed" | "rolled_back";
@@ -355,6 +355,7 @@ export class DeployService {
       Image: container.image,
       Cmd: options.prestep!.command,
       Env: container.environment,
+      Labels: options.prestep?.labels,
       Tty: false,
       HostConfig: {
         Binds: container.hostConfig?.Binds ?? [],

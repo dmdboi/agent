@@ -270,4 +270,86 @@ describe("DeployService", () => {
 
     expect(postMock).toHaveBeenCalledTimes(2);
   });
+
+  it("applies the supplied runtime labels unchanged despite conflicting environment identity", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200 }));
+    const docker = makeDocker();
+    const labels = {
+      "traefik.enable": "true",
+      "io.serversinc.agent.application_id": "supplied-app",
+      "io.serversinc.agent.environment_id": "supplied-environment",
+      "io.serversinc.agent.deployment_id": "supplied-deployment",
+      "io.serversinc.agent.workload_role": "runtime",
+    };
+
+    await new DeployService(docker as never).deploy(
+      baseOptions({
+        retire: [],
+        container: {
+          name: "app-1",
+          image: "app:1",
+          networks: ["traefik"],
+          environment: ["CORE_APP_ID=app-1", "CORE_ENV_ID=env-1"],
+          labels,
+        },
+      }),
+    );
+
+    expect(docker.createContainer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Labels: labels,
+      }),
+    );
+  });
+
+  it("applies separate supplied prestep and runtime label maps unchanged", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200 }));
+    const stream = new PassThrough();
+    stream.end();
+    const oneShot = {
+      attach: vi.fn().mockResolvedValue(stream),
+      start: vi.fn().mockResolvedValue(undefined),
+      wait: vi.fn().mockResolvedValue({ StatusCode: 0 }),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    const prestepCreate = vi.fn().mockResolvedValue(oneShot);
+    const docker = makeDocker({ docker: { createContainer: prestepCreate } });
+    const runtimeLabels = {
+      "traefik.enable": "true",
+      "io.serversinc.agent.application_id": "supplied-app",
+      "io.serversinc.agent.deployment_id": "supplied-deployment",
+      "io.serversinc.agent.workload_role": "runtime",
+    };
+    const prestepLabels = {
+      "io.serversinc.agent.application_id": "supplied-app",
+      "io.serversinc.agent.deployment_id": "supplied-deployment",
+      "io.serversinc.agent.workload_role": "prestep",
+      "custom.job": "migration",
+    };
+
+    await new DeployService(docker as never).deploy(
+      baseOptions({
+        retire: [],
+        prestep: { run: true, command: ["true"], labels: prestepLabels },
+        container: {
+          name: "app-1",
+          image: "app:1",
+          networks: ["traefik"],
+          environment: ["CORE_APP_ID=app-1"],
+          labels: runtimeLabels,
+        },
+      }),
+    );
+
+    expect(prestepCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Labels: prestepLabels,
+      }),
+    );
+    expect(docker.createContainer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Labels: runtimeLabels,
+      }),
+    );
+  });
 });
