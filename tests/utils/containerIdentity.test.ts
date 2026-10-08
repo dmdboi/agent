@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   MANAGED_LABEL_KEYS,
-  buildManagedLabels,
   identityFromEnv,
   identityFromLabels,
   parseContainerEnv,
@@ -57,16 +56,6 @@ describe("containerIdentity", () => {
   it("ignores an unknown workload role rather than forwarding it", () => {
     expect(identityFromLabels({ [MANAGED_LABEL_KEYS.workloadRole]: "bogus" }).workload_role).toBeNull();
     expect(identityFromLabels({ [MANAGED_LABEL_KEYS.workloadRole]: "runtime" }).workload_role).toBe("runtime");
-    expect(buildManagedLabels({ workloadRole: "bogus" as never })).toEqual({});
   });
 
-  it("builds managed labels, omitting empty fields", () => {
-    expect(
-      buildManagedLabels({ applicationId: "app-1", environmentId: null, deploymentId: "dep-1", workloadRole: "runtime" }),
-    ).toEqual({
-      [MANAGED_LABEL_KEYS.applicationId]: "app-1",
-      [MANAGED_LABEL_KEYS.deploymentId]: "dep-1",
-      [MANAGED_LABEL_KEYS.workloadRole]: "runtime",
-    });
-  });
 });

@@ -1,7 +1,6 @@
 /**
- * Identity shared between the deploy path (which stamps containers with labels)
- * and the event watcher (which reads them back off Docker events, or off an
- * inspect when one is still possible).
+ * Reads deployment-supplied identity from Docker events or an inspect when one
+ * is still possible.
  *
  * Docker merges a container's `Config.Labels` into `Actor.Attributes` for every
  * container lifecycle event, so these labels survive onto `start`/`die`/
@@ -91,34 +90,4 @@ export function identityFromLabels(labels?: Record<string, string> | null): Cont
     deployment_id: labels[MANAGED_LABEL_KEYS.deploymentId] ?? null,
     workload_role: normalizeWorkloadRole(labels[MANAGED_LABEL_KEYS.workloadRole]),
   };
-}
-
-/** Builds the labels a deploy stamps onto a container. Empty fields are omitted. */
-export function buildManagedLabels(input: {
-  applicationId?: string | null;
-  environmentId?: string | null;
-  deploymentId?: string | null;
-  workloadRole?: WorkloadRole | null;
-}): Record<string, string> {
-  const labels: Record<string, string> = {};
-
-  if (input.applicationId) {
-    labels[MANAGED_LABEL_KEYS.applicationId] = input.applicationId;
-  }
-
-  if (input.environmentId) {
-    labels[MANAGED_LABEL_KEYS.environmentId] = input.environmentId;
-  }
-
-  if (input.deploymentId) {
-    labels[MANAGED_LABEL_KEYS.deploymentId] = input.deploymentId;
-  }
-
-  const workloadRole = normalizeWorkloadRole(input.workloadRole);
-
-  if (workloadRole) {
-    labels[MANAGED_LABEL_KEYS.workloadRole] = workloadRole;
-  }
-
-  return labels;
 }
