@@ -443,10 +443,16 @@ describe("WatcherService", () => {
     await flush();
 
     const [payload] = forwardedPayloads();
-    expect(payload.timeNano).toBe("1700000000123456789");
+    expect(payload).toEqual({
+      event: "start",
+      type: "container",
+      id: "abc123",
+      time: 1_700_000_000,
+      timeNano: "1700000000123456789",
+      attributes: {},
+    });
     // The same value parsed as a JS number and re-stringified is demonstrably wrong.
     expect(String(Number("1700000000123456789"))).not.toBe("1700000000123456789");
-    expect(payload.event_id).toBe("container:start:abc123:1700000000123456789");
     expect(payload.time).toBe(1_700_000_000);
   });
 
@@ -468,7 +474,6 @@ describe("WatcherService", () => {
 
     const [payload] = forwardedPayloads();
     expect(payload).not.toHaveProperty("timeNano");
-    expect(payload).not.toHaveProperty("event_id");
     expect(payload.time).toBe(1_700_000_000);
   });
 

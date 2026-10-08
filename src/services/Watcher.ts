@@ -23,8 +23,6 @@ interface EventPayload {
   time: number;
   /** Exact decimal nanosecond timestamp, kept as a string (see extractTimeNano). */
   timeNano?: string;
-  /** Stable identity for one occurrence: type + action + Docker id + occurrence. */
-  event_id?: string;
   attributes: Record<string, unknown>;
 }
 
@@ -223,11 +221,6 @@ export class WatcherService {
         payload.timeNano = timeNano;
       }
 
-      const eventId = this.buildEventId(event, timeNano);
-
-      if (eventId) {
-        payload.event_id = eventId;
-      }
     }
 
     // Enrich an image pull with the details only an inspect can give — the raw
@@ -324,14 +317,6 @@ export class WatcherService {
 
       this.applyIdentity(payload.attributes, identityFromLabels(event.Actor.Attributes));
     }
-  }
-
-  private buildEventId(event: DockerEvent, timeNano: string | null): string | null {
-    if (!timeNano) {
-      return null;
-    }
-
-    return `${event.Type}:${event.Action}:${event.Actor.ID}:${timeNano}`;
   }
 
   /** Copies the known identity fields onto an event's attributes. */
